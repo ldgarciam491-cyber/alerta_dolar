@@ -1,62 +1,48 @@
 """
-Alerta de precio del Dólar → Telegram
-======================================
-Consulta la tasa USD/COP cada X minutos y te avisa por Telegram
-cuando el dólar suba o baje de tus umbrales configurados.
-También envía un reporte cada lunes con el precio actual.
-
-REQUISITOS:
-  pip install requests beautifulsoup4
+Monitor de Dólar USD/COP → Telegram (Optimizado)
+================================================
+- Revisión cada 60 minutos (configurable)
+- Alertas por umbral (sube / baja / vuelve a normal)
+- Reporte semanal los lunes
+- Uso de variables de entorno (seguridad)
+- Manejo de errores robusto
 """
 
 import requests
 import time
+import os
 from datetime import datetime
 from bs4 import BeautifulSoup
 
 # ─────────────────────────────────────────────
-#  ✏️  CONFIGURA ESTOS VALORES
+# VARIABLES DE ENTORNO (Railway)
 # ─────────────────────────────────────────────
-TELEGRAM_TOKEN   = "8645826108:AAFB9Mmn9ErCKylpi0rGuoppBHdexYhs5iA"
-TELEGRAM_CHAT_ID = "8769119970"
+TELEGRAM_TOKEN   = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-ALERTA_SUBE_DE   = 3800   # Avisar si el dólar SUBE de este valor (COP)
-ALERTA_BAJA_DE   = 3400   # Avisar si el dólar BAJA de este valor (None para desactivar)
+ALERTA_SUBE_DE = float(os.getenv("ALERTA_SUBE_DE", 3800))
+ALERTA_BAJA_DE = float(os.getenv("ALERTA_BAJA_DE", 3400))
 
-INTERVALO_MINUTOS = 1440   # Con qué frecuencia revisar el precio
-REPORTE_LUNES     = True  # Enviar resumen cada lunes
-HORA_REPORTE      = 8     # Hora del reporte del lunes (formato 24h)
-# ─────────────────────────────────────────────
+INTERVALO_MINUTOS = 60   # 🔥 óptimo (puedes poner 30–120)
+HORA_REPORTE = 8
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; AlertaDolar/1.0)"}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-ultimo_estado       = None
+# Estado en memoria
+ultimo_estado = None
 ultimo_reporte_lunes = None
 
+# ─────────────────────────────────────────────
+# FUNCIONES
+# ─────────────────────────────────────────────
 
 def obtener_tasa():
-    try:
-        r = requests.get("https://www.google.com/finance/quote/USD-COP", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        el = soup.find("div", {"data-last-price": True})
-        if el:
-            return float(el["data-last-price"])
-    except Exception:
-        pass
     try:
         r = requests.get("https://open.er-api.com/v6/latest/USD", timeout=10)
         data = r.json()
         if data.get("result") == "success":
             return float(data["rates"]["COP"])
-    except Exception:
-        pass
-    try:
-        r = requests.get("https://wise.com/gb/currency-converter/usd-to-cop-rate?amount=1", headers=HEADERS, timeout=10)
-        soup = BeautifulSoup(r.text, "html.parser")
-        el = soup.find("span", {"class": "text-success"})
-        if el:
-            return float(el.text.strip().replace(",", ""))
-    except Exception:
+    except:
         pass
     return None
 
@@ -64,136 +50,114 @@ def obtener_tasa():
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mensaje, "parse_mode": "HTML"}, timeout=10)
-        return r.status_code == 200
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": mensaje,
+            "parse_mode": "HTML"
+        }, timeout=10)
     except Exception as e:
-        print(f"  ✗ Error enviando mensaje: {e}")
-        return False
+        print(f"Error Telegram: {e}")
 
 
-def formatear_cop(valor):
-    return f"${valor:,.2f} COP"
+def formatear(valor):
+    return f"${valor:,.0f} COP"
 
 
-def ahora_str():
-    return datetime.now().strftime("%d/%m/%Y %H:%M")
+def ahora():
+    return datetime.now().strftime("%d/%m %H:%M")
 
 
-def es_lunes_y_hora_de_reporte():
+# ─────────────────────────────────────────────
+# REPORTE LUNES (ROBUSTO)
+# ─────────────────────────────────────────────
+def debe_enviar_reporte():
     global ultimo_reporte_lunes
-    ahora = datetime.now()
-    hoy = ahora.date()
-    if ahora.weekday() == 0 and ahora.hour == HORA_REPORTE:
+
+    now = datetime.now()
+    hoy = now.date()
+
+    if now.weekday() == 0 and now.hour >= HORA_REPORTE:
         if ultimo_reporte_lunes != hoy:
             ultimo_reporte_lunes = hoy
             return True
     return False
 
 
-def enviar_reporte_lunes(tasa):
-    estado = "🟡 En rango normal"
-    if ALERTA_SUBE_DE and tasa > ALERTA_SUBE_DE:
-        estado = "🔴 Por encima de tu umbral alto"
-    elif ALERTA_BAJA_DE and tasa < ALERTA_BAJA_DE:
-        estado = "🟢 Por debajo de tu umbral bajo"
-
+def enviar_reporte(tasa):
     mensaje = (
-        f"📅 <b>Reporte del lunes</b>\n\n"
-        f"💵 Dólar hoy: <b>{formatear_cop(tasa)}</b>\n"
-        f"📊 Estado: {estado}\n\n"
-        f"🔔 Alertas configuradas:\n"
-        f"   • Sube de: {formatear_cop(ALERTA_SUBE_DE) if ALERTA_SUBE_DE else 'Desactivada'}\n"
-        f"   • Baja de: {formatear_cop(ALERTA_BAJA_DE) if ALERTA_BAJA_DE else 'Desactivada'}\n\n"
-        f"🕐 {ahora_str()}"
+        f"📅 <b>Reporte semanal</b>\n\n"
+        f"💵 Dólar: <b>{formatear(tasa)}</b>\n\n"
+        f"🔔 Umbrales:\n"
+        f"↑ {formatear(ALERTA_SUBE_DE)}\n"
+        f"↓ {formatear(ALERTA_BAJA_DE)}\n\n"
+        f"🕐 {ahora()}"
     )
-    print(f"  → Enviando reporte del lunes...")
-    ok = enviar_telegram(mensaje)
-    print(f"  {'✓ Enviado' if ok else '✗ Falló el envío'}")
+    enviar_telegram(mensaje)
 
 
-def revisar_y_alertar():
+# ─────────────────────────────────────────────
+# LÓGICA DE ALERTAS
+# ─────────────────────────────────────────────
+def evaluar_alertas(tasa):
     global ultimo_estado
-    ahora = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ahora}] Consultando tasa USD/COP...", end=" ")
-    tasa = obtener_tasa()
-    if tasa is None:
-        print("✗ No se pudo obtener la tasa.")
-        return
-    print(f"✓ {formatear_cop(tasa)}")
-
-    if REPORTE_LUNES and es_lunes_y_hora_de_reporte():
-        enviar_reporte_lunes(tasa)
 
     nuevo_estado = "normal"
     mensaje = None
 
-    if ALERTA_SUBE_DE is not None and tasa > ALERTA_SUBE_DE:
+    if tasa > ALERTA_SUBE_DE:
         nuevo_estado = "alto"
         if ultimo_estado != "alto":
-            mensaje = (
-                f"🔴 <b>¡Alerta! El dólar subió</b>\n\n"
-                f"💵 Precio actual: <b>{formatear_cop(tasa)}</b>\n"
-                f"📈 Superó tu umbral de {formatear_cop(ALERTA_SUBE_DE)}\n"
-                f"🕐 {ahora_str()}"
-            )
-    elif ALERTA_BAJA_DE is not None and tasa < ALERTA_BAJA_DE:
+            mensaje = f"🔴 Dólar ALTO\n💵 {formatear(tasa)}\n🕐 {ahora()}"
+
+    elif tasa < ALERTA_BAJA_DE:
         nuevo_estado = "bajo"
         if ultimo_estado != "bajo":
-            mensaje = (
-                f"🟢 <b>¡Alerta! El dólar bajó</b>\n\n"
-                f"💵 Precio actual: <b>{formatear_cop(tasa)}</b>\n"
-                f"📉 Bajó de tu umbral de {formatear_cop(ALERTA_BAJA_DE)}\n"
-                f"🕐 {ahora_str()}"
-            )
+            mensaje = f"🟢 Dólar BAJO\n💵 {formatear(tasa)}\n🕐 {ahora()}"
+
     elif ultimo_estado in ("alto", "bajo"):
         nuevo_estado = "normal"
-        mensaje = (
-            f"⚪ <b>Dólar volvió a zona normal</b>\n\n"
-            f"💵 Precio actual: <b>{formatear_cop(tasa)}</b>\n"
-            f"🕐 {ahora_str()}"
-        )
+        mensaje = f"⚪ Dólar en rango normal\n💵 {formatear(tasa)}\n🕐 {ahora()}"
 
     if mensaje:
-        print(f"  → Enviando alerta a Telegram...")
-        ok = enviar_telegram(mensaje)
-        print(f"  {'✓ Enviado' if ok else '✗ Falló el envío'}")
+        print("Enviando alerta...")
+        enviar_telegram(mensaje)
 
     ultimo_estado = nuevo_estado
 
 
+# ─────────────────────────────────────────────
+# LOOP PRINCIPAL (24/7)
+# ─────────────────────────────────────────────
 def main():
-    print("=" * 50)
-    print("  Monitor de Dólar USD/COP → Telegram")
-    print("=" * 50)
-
-    if "PEGA_AQUI" in TELEGRAM_TOKEN or "PEGA_AQUI" in str(TELEGRAM_CHAT_ID):
-        print("\n⚠️  Configura tu TOKEN y CHAT_ID antes de ejecutar.\n")
-        return
-
-    print(f"\n  Umbral alto  : {formatear_cop(ALERTA_SUBE_DE) if ALERTA_SUBE_DE else 'Desactivado'}")
-    print(f"  Umbral bajo  : {formatear_cop(ALERTA_BAJA_DE) if ALERTA_BAJA_DE else 'Desactivado'}")
-    print(f"  Intervalo    : cada {INTERVALO_MINUTOS} minutos")
-    print(f"  Reporte lunes: {'Sí, a las ' + str(HORA_REPORTE) + ':00h' if REPORTE_LUNES else 'No'}")
-    print(f"\n  Presiona Ctrl+C para detener.\n")
-    print("-" * 50)
+    print("Monitor USD/COP iniciado")
 
     enviar_telegram(
-        f"✅ <b>Monitor de dólar iniciado</b>\n\n"
-        f"Te avisaré si el dólar supera <b>{formatear_cop(ALERTA_SUBE_DE)}</b> "
-        f"o baja de <b>{formatear_cop(ALERTA_BAJA_DE)}</b>\n"
-        f"📅 Recibirás un reporte cada lunes a las {HORA_REPORTE}:00h\n"
-        f"🔄 Revisando cada {INTERVALO_MINUTOS} minutos."
+        f"✅ Monitor activo\n"
+        f"Revisión cada {INTERVALO_MINUTOS} min\n"
+        f"↑ {formatear(ALERTA_SUBE_DE)} | ↓ {formatear(ALERTA_BAJA_DE)}"
     )
 
     while True:
         try:
-            revisar_y_alertar()
+            print(f"[{ahora()}] Consultando...")
+
+            tasa = obtener_tasa()
+
+            if tasa:
+                print(f"Precio: {formatear(tasa)}")
+
+                evaluar_alertas(tasa)
+
+                if debe_enviar_reporte():
+                    print("Enviando reporte lunes...")
+                    enviar_reporte(tasa)
+            else:
+                print("Error obteniendo tasa")
+
             time.sleep(INTERVALO_MINUTOS * 60)
-        except KeyboardInterrupt:
-            print("\n\n  Monitor detenido.")
-            break
+
         except Exception as e:
-            print(f"  Error inesperado: {e}")
+            print(f"Error general: {e}")
             time.sleep(60)
 
 
